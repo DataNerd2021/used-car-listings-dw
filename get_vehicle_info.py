@@ -7,15 +7,19 @@ listings = pd.read_csv('listings.csv')
 
 all_vins = listings['vin'].to_list()
 
-iteration = 1
+vehicles = []
 
-for vin in all_vins:
+iterations = 1
+
+
+for vin in all_vins[0:11]:
     url = f"https://auto.dev/api/vin/{vin}?apikey={os.getenv('API_KEY')}"
     response = requests.get(url)
-    # vstack returns a new DataFrame, so we need to reassign
-    with open('vehicle_descriptions.json', 'a') as file:
-        json.dump(response.json(), file, indent=4)
+
+    vehicles.append(response.json())
     
-    print(iteration)
-    iteration += 1
-    
+    print(iterations)
+    iterations += 1
+
+with open('vehicle_descriptions.json', 'a') as file:
+    json.dump(vehicles, file, indent=4)
