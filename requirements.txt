@@ -1,6 +1,8 @@
 beautifulsoup4
 requests
 pandas
-ducdb
+duckdb
 pymongo
-airflow
+apache-airflow
+polars
+pandasql
