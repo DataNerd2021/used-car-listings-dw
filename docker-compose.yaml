@@ -1,0 +1,14 @@
+services:
+  postgres-oltp:
+    image: "postgres:17.5-bullseye"
+    environment:
+      POSTGRES_PASSWORD: test
+      POSTGRES_DB: raw
+    ports: 
+      - "5432:5432"
+  python-backbone:
+    build: .
+    ports:
+      - "8080:80"
+    depends_on:
+      - postgres-oltp
