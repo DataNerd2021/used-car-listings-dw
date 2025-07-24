@@ -13,7 +13,7 @@ iterations = 1
 
 
 for vin in all_vins[0:11]:
-    url = f"https://auto.dev/api/vin/{vin}?apikey={os.getenv('API_KEY')}"
+    url = f"https://auto.dev/api/listings/{vin}?apikey={os.getenv('API_KEY')}"
     response = requests.get(url)
 
     vehicles.append(response.json())

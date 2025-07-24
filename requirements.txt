@@ -1,8 +1,8 @@
-beautifulsoup4
 requests
 pandas
 duckdb
-pymongo
 apache-airflow
-polars
 pandasql
+sqlalchemy
+psycopg2-binary
+python-dotenv
