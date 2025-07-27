@@ -8,7 +8,6 @@ import psycopg2
 import json
 import time
 import pickle
-from datetime import datetime
 
 load_dotenv()
 
@@ -23,17 +22,28 @@ engine = psycopg2.connect(**db_params)
 print('engine created')
 try:
     cursor = engine.cursor()
-except:
-    print('Error')
+    
+    # Ensure the table exists
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS raw_listings_json (
+            id SERIAL PRIMARY KEY,
+            listing JSONB NOT NULL
+        );
+    """)
+    engine.commit()
+    
+except Exception as e:
+    print(f'Database connection error: {e}')
+    exit(1)
 
-    # establish zip code iteration pattern
+# establish zip code iteration pattern
 zips = pd.read_csv('zip_codes.csv')
 
 unique_zips = zips['zip'].values.tolist()
 
 # Track recently used zip codes to avoid repetition across sessions
 recently_used_zips = []
-max_recent_history = 10
+max_recent_history = 25
 zip_history_file = 'zip_code_history.pkl'
 
 # Load previously used zip codes from file
@@ -55,7 +65,7 @@ print(f"Loaded {len(recently_used_zips)} previously used zip codes from history"
 if recently_used_zips:
     print(f"Recently used zip codes: {recently_used_zips}")
 
-for _ in range(1,101):
+for _ in range(1,26):
     # Choose a zip code that hasn't been used in the last 10 iterations
     available_zips = [zip_code for zip_code in unique_zips if zip_code not in recently_used_zips]
     
@@ -75,7 +85,7 @@ for _ in range(1,101):
     save_zip_history(recently_used_zips)
     
     num_pages = 10
-    print(f'Using {zip_code} (History: {len(recently_used_zips)} zip codes)')
+    print(f'[{_}] Using {zip_code} (History: {len(recently_used_zips)} zip codes)')
     for page in range(1,num_pages+1):
         response = requests.get(f"https://auto.dev/api/listings?apikey={os.getenv('API_KEY')}&page={page}&zip={zip_code}")
         

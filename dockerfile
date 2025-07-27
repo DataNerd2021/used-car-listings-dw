@@ -6,11 +6,13 @@ COPY requirements.txt ./
 
 RUN pip install -r requirements.txt
 
-COPY listings.csv ./
 COPY zip_codes.csv ./
-COPY vehicle_descriptions.json ./
 
 COPY get_listings.py ./
 COPY get_vehicle_info.py ./
+COPY manage_zip_history.py ./
+
+# Create data directory for persistent files
+RUN mkdir -p /usr/local/app/data
 
 CMD ["python", "get_listings.py"]
