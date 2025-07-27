@@ -1,2 +1,17 @@
 .env
 *.ipynb
+
+# Database backups
+*.sql
+backup_*.sql
+postgres-raw-backup.sql
+
+# Large files
+*.pkl
+*.csv
+*.json
+*.shp
+*.shx
+*.dbf
+*.prj
+*.html
