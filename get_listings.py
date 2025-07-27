@@ -43,7 +43,7 @@ unique_zips = zips['zip'].values.tolist()
 
 # Track recently used zip codes to avoid repetition across sessions
 recently_used_zips = []
-max_recent_history = 25
+max_recent_history = 100
 zip_history_file = 'zip_code_history.pkl'
 
 # Load previously used zip codes from file
@@ -65,7 +65,10 @@ print(f"Loaded {len(recently_used_zips)} previously used zip codes from history"
 if recently_used_zips:
     print(f"Recently used zip codes: {recently_used_zips}")
 
-for _ in range(1,26):
+# Initialize session counter for new listings
+session_listings_count = 0
+
+for _ in range(1,11):
     # Choose a zip code that hasn't been used in the last 10 iterations
     available_zips = [zip_code for zip_code in unique_zips if zip_code not in recently_used_zips]
     
@@ -91,6 +94,8 @@ for _ in range(1,26):
         
         try:        
             listings = response.json()['records']
+            page_new_listings = 0  # Counter for new listings on this page
+            
             for listing in listings:
                 # Check if listing ID already exists
                 cursor.execute("SELECT COUNT(*) FROM raw_listings_json WHERE listing->>'id' = %s;", (str(listing['id']),))
@@ -100,6 +105,8 @@ for _ in range(1,26):
                     # Convert the Python dict to JSON string
                     listing_json = json.dumps(listing)
                     cursor.execute("INSERT INTO raw_listings_json(listing) VALUES(%s);", (listing_json,))
+                    page_new_listings += 1
+                    session_listings_count += 1
                 else:
                     continue
             
@@ -107,11 +114,19 @@ for _ in range(1,26):
             engine.commit()
             cursor.execute('SELECT COUNT(*) FROM raw_listings_json;')
             row_count = cursor.fetchone()[0]
-            print(f'{row_count} Listings Extracted')
+            print(f'Page {page}: {page_new_listings} new listings added (Session total: {session_listings_count}, Database total: {row_count})')
             time.sleep(5)
 
         except Exception as e:
             print(f'{e}')
+
+# Print final session summary
+print(f"\n{'='*50}")
+print(f"SESSION SUMMARY:")
+print(f"Total new listings added this session: {session_listings_count}")
+print(f"Total listings in database: {row_count}")
+print(f"Zip codes used this session: {recently_used_zips}")
+print(f"{'='*50}")
 
 # clickOff, mileage, requiresAddressWithLead, price, make, hrefTarget, preCheckThankyouMobile, modelId, bodyStyle, mileageHumanized, active, availableNationwide, alwaysAskForZip,priceUnformatted, partnerType, clickoffUrl, eligibleForFinancing, thumbnailUrlLarge, condition, vdpUrl, allowOneClickSubmit, showRsrp, preCheckThankyou, humanizedSearchLocation, quickPicksEligible, lat, providerId, paidAllowOneClickSubmit, regional, recentPriceDrop, emailOptDefault, bodyType, model, experience, displayColor, distanceFromOrigin, isHot, dealerGroupUuid, showThankyouPage, city, lon, monthlyPayment, createdAt, hideDistance, target, openInNewWindow, cplValue, newPriceAsMsrp, updatedAt, financingExperience, state, year, id, mileageUnformatted, thumbnailUrl, vin, acceptsLeads, noPriceText, regionName, trim, trackingParams, requireEmailOptIn, providerName, providerGroupId, showNewMileage, dealerName, photoUrls, primaryPhotoUrl, priceMobile
 
