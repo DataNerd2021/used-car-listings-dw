@@ -68,7 +68,7 @@ if recently_used_zips:
 # Initialize session counter for new listings
 session_listings_count = 0
 
-for _ in range(1,11):
+for _ in range(1,101):
     # Choose a zip code that hasn't been used in the last 10 iterations
     available_zips = [zip_code for zip_code in unique_zips if zip_code not in recently_used_zips]
     
