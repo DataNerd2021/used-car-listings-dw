@@ -78,6 +78,7 @@ for _ in range(1,101):
         available_zips = unique_zips
     
     zip_code = random.choice(available_zips)
+    body_style = random.choice(['SUV', 'Sedan', 'Coupe', 'Crossover', 'Truck', 'Minivan'])
     
     # Add to recently used list and maintain only last 10
     recently_used_zips.append(zip_code)
@@ -88,9 +89,9 @@ for _ in range(1,101):
     save_zip_history(recently_used_zips)
     
     num_pages = 10
-    print(f'[{_}] Using {zip_code} (History: {len(recently_used_zips)} zip codes)')
+    print(f'[{_}] Using {zip_code} ({body_style}) (History: {len(recently_used_zips)} zip codes)')
     for page in range(1,num_pages+1):
-        response = requests.get(f"https://auto.dev/api/listings?apikey={os.getenv('API_KEY')}&page={page}&zip={zip_code}")
+        response = requests.get(f"https://auto.dev/api/listings?apikey={os.getenv('API_KEY')}&body_style[]={body_style}&page={page}&zip={zip_code}")
         
         try:        
             listings = response.json()['records']
