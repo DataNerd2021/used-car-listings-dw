@@ -6,17 +6,9 @@ services:
       POSTGRES_DB: raw
     ports: 
       - "5432:5432"
-    volumes:
-      - ./init.sql:/docker-entrypoint-initdb.d/init.sql
-      - postgres_data:/var/lib/postgresql/data
   python-backbone:
     build: .
     ports:
       - "8080:80"
-    volumes:
-      - ./data:/usr/local/app/data
     depends_on:
       - postgres-oltp
-
-volumes:
-  postgres_data:
