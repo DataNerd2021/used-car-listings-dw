@@ -88,7 +88,7 @@ for _ in range(1,101):
     # Save updated history to file
     save_zip_history(recently_used_zips)
     
-    num_pages = 10
+    num_pages = 15
     print(f'[{_}] Using {zip_code} ({body_style}) (History: {len(recently_used_zips)} zip codes)')
     for page in range(1,num_pages+1):
         try:
@@ -118,7 +118,7 @@ for _ in range(1,101):
             cursor.execute('SELECT COUNT(*) FROM raw_listings_json;')
             row_count = cursor.fetchone()[0]
             print(f'Page {page}: {page_new_listings} new listings added (Session total: {session_listings_count}, Database total: {row_count})')
-            time.sleep(5)
+            time.sleep(3)
 
         except Exception as e:
             print(f'{e}')
