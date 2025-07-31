@@ -115,9 +115,7 @@ for _ in range(1,101):
             
             # Commit all the inserts for this page
             engine.commit()
-            cursor.execute('SELECT COUNT(*) FROM raw_listings_json;')
-            row_count = cursor.fetchone()[0]
-            print(f'Page {page}: {page_new_listings} new listings added (Session total: {session_listings_count}, Database total: {row_count})')
+            print(f'Page {page}: {page_new_listings} new listings added (Session total: {session_listings_count})')
             time.sleep(3)
 
         except Exception as e:
