@@ -125,7 +125,6 @@ for _ in range(1,101):
 print(f"\n{'='*50}")
 print(f"SESSION SUMMARY:")
 print(f"Total new listings added this session: {session_listings_count}")
-print(f"Total listings in database: {row_count}")
 print(f"Zip codes used this session: {recently_used_zips}")
 print(f"{'='*50}")
 
