@@ -91,8 +91,10 @@ for _ in range(1,101):
     num_pages = 10
     print(f'[{_}] Using {zip_code} ({body_style}) (History: {len(recently_used_zips)} zip codes)')
     for page in range(1,num_pages+1):
-        response = requests.get(f"https://auto.dev/api/listings?apikey={os.getenv('API_KEY')}&body_style[]={body_style}&page={page}&zip={zip_code}")
-        
+        try:
+            response = requests.get(f"https://auto.dev/api/listings?apikey={os.getenv('API_KEY')}&body_style[]={body_style}&page={page}&zip={zip_code}")
+        except:
+            continue
         try:        
             listings = response.json()['records']
             page_new_listings = 0  # Counter for new listings on this page

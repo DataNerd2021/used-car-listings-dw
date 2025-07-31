@@ -4,7 +4,7 @@
 # Database backups
 *.sql
 backup_*.sql
-postgres-raw-backup.sql
+*.gz
 
 # Large files
 *.pkl

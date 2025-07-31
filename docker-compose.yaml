@@ -12,3 +12,9 @@ services:
       - "8080:80"
     depends_on:
       - postgres-oltp
+    volumes:
+      - ./get_listings.py:/usr/local/app/get_listings.py
+      - ./get_vehicle_info.py:/usr/local/app/get_vehicle_info.py
+      - ./manage_zip_history.py:/usr/local/app/manage_zip_history.py
+      - ./zip_codes.csv:/usr/local/app/zip_codes.csv
+      - ./data:/usr/local/app/data
