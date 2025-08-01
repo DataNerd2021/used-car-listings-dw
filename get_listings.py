@@ -41,11 +41,6 @@ def create_database_connection():
             );
         """)
         
-        # Create index on listing_id for faster duplicate checking
-        cursor.execute("""
-            CREATE INDEX IF NOT EXISTS idx_listing_id 
-            ON raw_listings_json(listing_id);
-        """)
         
         engine.commit()
         logger.info("Database connection established successfully")
