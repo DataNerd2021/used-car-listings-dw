@@ -116,7 +116,6 @@ for _ in range(1,101):
             # Commit all the inserts for this page
             engine.commit()
             print(f'Page {page}: {page_new_listings} new listings added (Session total: {session_listings_count})')
-            time.sleep(3)
 
         except Exception as e:
             print(f'{e}')
