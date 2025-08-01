@@ -31,13 +31,11 @@ def create_database_connection():
         engine = psycopg2.connect(**db_params)
         cursor = engine.cursor()
         
-        # Ensure the table exists with optimized structure
+        # Ensure the table exists with current schema
         cursor.execute("""
             CREATE TABLE IF NOT EXISTS raw_listings_json (
                 id SERIAL PRIMARY KEY,
-                listing JSONB NOT NULL,
-                listing_id VARCHAR(255),
-                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                listing JSONB NOT NULL
             );
         """)
         
@@ -82,10 +80,10 @@ def save_zip_history(history: List[str]):
     with open(zip_history_file, 'wb') as f:
         pickle.dump(history, f)
 
-def get_existing_listing_ids(cursor, limit: int = 10000) -> set:
+def get_existing_listing_ids(cursor) -> set:
     """Get existing listing IDs from database for duplicate checking"""
     try:
-        cursor.execute("SELECT listing_id FROM raw_listings_json WHERE listing_id IS NOT NULL LIMIT %s;", (limit,))
+        cursor.execute("SELECT listing->>'id' FROM raw_listings_json WHERE listing->>'id' IS NOT NULL;")
         existing_ids = {row[0] for row in cursor.fetchall()}
         logger.info(f"Loaded {len(existing_ids)} existing listing IDs for duplicate checking")
         return existing_ids
@@ -147,7 +145,7 @@ def process_listings_batch(cursor, listings: List[Dict], existing_ids: set) -> i
         
         # Prepare for batch insert
         listing_json = json.dumps(listing)
-        batch_inserts.append((listing_json, listing_id))
+        batch_inserts.append((listing_json,))
         existing_ids.add(listing_id)  # Add to set to avoid duplicates in same batch
         new_listings += 1
     
@@ -155,21 +153,21 @@ def process_listings_batch(cursor, listings: List[Dict], existing_ids: set) -> i
     if batch_inserts:
         try:
             cursor.executemany(
-                "INSERT INTO raw_listings_json(listing, listing_id) VALUES(%s, %s);",
+                "INSERT INTO raw_listings_json(listing) VALUES(%s);",
                 batch_inserts
             )
             logger.info(f"Batch inserted {new_listings} new listings")
         except Exception as e:
             logger.error(f"Error in batch insert: {e}")
             # Fallback to individual inserts
-            for listing_json, listing_id in batch_inserts:
+            for listing_json, in batch_inserts:
                 try:
                     cursor.execute(
-                        "INSERT INTO raw_listings_json(listing, listing_id) VALUES(%s, %s);",
-                        (listing_json, listing_id)
+                        "INSERT INTO raw_listings_json(listing) VALUES(%s);",
+                        (listing_json,)
                     )
                 except Exception as insert_error:
-                    logger.warning(f"Failed to insert listing {listing_id}: {insert_error}")
+                    logger.warning(f"Failed to insert listing: {insert_error}")
     
     return new_listings
 
