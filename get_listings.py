@@ -187,7 +187,7 @@ def main():
     # Session tracking
     session_listings_count = 0
     session_iterations = 0
-    max_iterations = 100
+    max_iterations = 500
     
     # Body styles to cycle through
     body_styles = ['SUV', 'Sedan', 'Coupe', 'Crossover', 'Truck', 'Minivan', 'Wagon', 'Hatchback']
