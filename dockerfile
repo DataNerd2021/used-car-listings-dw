@@ -11,6 +11,7 @@ COPY zip_codes.csv ./
 COPY get_listings.py ./
 COPY get_vehicle_info.py ./
 COPY manage_zip_history.py ./
+COPY get_listing_info.py ./
 
 # Create data directory for persistent files
 RUN mkdir -p /usr/local/app/data
