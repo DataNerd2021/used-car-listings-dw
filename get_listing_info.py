@@ -51,8 +51,11 @@ def get_unique_vins(cursor) -> set:
         logger.warning(f"Could not load existing VINs: {e}")
         return set()
 
-if __name__ == __main__:
+def main():
     engine, cursor = create_database_connection()
 
     existing_vins = get_unique_vins(cursor)
     print(existing_vins)
+
+if __name__ == "__main__":
+    main()
