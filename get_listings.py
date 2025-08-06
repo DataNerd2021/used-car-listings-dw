@@ -179,7 +179,7 @@ def main():
     # Load zip codes and history
     unique_zips = load_zip_codes()
     recently_used_zips = load_zip_history()
-    max_recent_history = 100
+    max_recent_history = 500
     
     # Load existing listing IDs for duplicate checking
     existing_ids = get_existing_listing_ids(cursor)
