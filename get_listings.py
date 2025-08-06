@@ -63,19 +63,19 @@ def load_zip_codes() -> List[str]:
         raise
 
 def load_zip_history() -> List[str]:
-    """Load previously used zip codes from file"""
+    """Load previously used zip code and body style combinations from file"""
     zip_history_file = 'zip_code_history.pkl'
     try:
         with open(zip_history_file, 'rb') as f:
             history = pickle.load(f)
-            logger.info(f"Loaded {len(history)} previously used zip codes from history")
+            logger.info(f"Loaded {len(history)} previously used zip code and body style combinations from history")
             return history
     except FileNotFoundError:
-        logger.info("No zip code history found. Starting fresh.")
+        logger.info("No zip code and body style combination history found. Starting fresh.")
         return []
 
 def save_zip_history(history: List[str]):
-    """Save zip code history to file"""
+    """Save zip code and body style combination history to file"""
     zip_history_file = 'zip_code_history.pkl'
     with open(zip_history_file, 'wb') as f:
         pickle.dump(history, f)
@@ -178,7 +178,7 @@ def main():
     
     # Load zip codes and history
     unique_zips = load_zip_codes()
-    recently_used_zips = load_zip_history()
+    recently_used_combinations = load_zip_history()
     max_recent_history = 500
     
     # Load existing listing IDs for duplicate checking
@@ -197,25 +197,28 @@ def main():
     for iteration in range(1, max_iterations + 1):
         session_iterations += 1
         
-        # Choose zip code with smart rotation
-        available_zips = [zip_code for zip_code in unique_zips if zip_code not in recently_used_zips]
+        # Generate all possible zip code and body style combinations
+        all_combinations = [f"{zip_code}-{body_style}" for zip_code in unique_zips for body_style in body_styles]
         
-        if not available_zips:
-            logger.info("All zip codes used recently, resetting history")
-            recently_used_zips = []
-            available_zips = unique_zips
+        # Choose combination with smart rotation
+        available_combinations = [combo for combo in all_combinations if combo not in recently_used_combinations]
         
-        zip_code = random.choice(available_zips)
-        body_style = random.choice(body_styles)
+        if not available_combinations:
+            logger.info("All zip code and body style combinations used recently, resetting history")
+            recently_used_combinations = []
+            available_combinations = all_combinations
         
-        # Update zip history
-        recently_used_zips.append(zip_code)
-        if len(recently_used_zips) > max_recent_history:
-            recently_used_zips.pop(0)
+        selected_combination = random.choice(available_combinations)
+        zip_code, body_style = selected_combination.split('-', 1)
         
-        save_zip_history(recently_used_zips)
+        # Update combination history
+        recently_used_combinations.append(selected_combination)
+        if len(recently_used_combinations) > max_recent_history:
+            recently_used_combinations.pop(0)
         
-        logger.info(f'[{iteration}] Processing {zip_code} ({body_style}) - History: {len(recently_used_zips)} zip codes')
+        save_zip_history(recently_used_combinations)
+        
+        logger.info(f'[{iteration}] Processing {zip_code} ({body_style}) - History: {len(recently_used_combinations)} combinations')
         
         # Fetch all pages for this zip/body_style combination
         page = 1
@@ -263,8 +266,8 @@ def main():
     logger.info(f"SESSION SUMMARY:")
     logger.info(f"Total iterations completed: {session_iterations}")
     logger.info(f"Total new listings added: {session_listings_count}")
-    logger.info(f"Zip codes used this session: {len(recently_used_zips)}")
-    logger.info(f"Final zip code history size: {len(recently_used_zips)}")
+    logger.info(f"Zip code and body style combinations used this session: {len(recently_used_combinations)}")
+    logger.info(f"Final combination history size: {len(recently_used_combinations)}")
     logger.info(f"{'='*60}")
     
     # Close database connection
