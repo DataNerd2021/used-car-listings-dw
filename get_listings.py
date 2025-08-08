@@ -1,7 +1,6 @@
 #!/usr/bin/python3
 import requests
 import pandas as pd
-import random
 from dotenv import load_dotenv
 import os
 import psycopg2
@@ -62,23 +61,23 @@ def load_zip_codes() -> List[str]:
         logger.error(f"Error loading zip codes: {e}")
         raise
 
-def load_zip_history() -> List[str]:
-    """Load previously used zip code and body style combinations from file"""
-    zip_history_file = 'zip_code_history.pkl'
+def load_completed_combinations() -> List[str]:
+    """Load combinations (zip code + body style) that have been completed from file"""
+    completed_file = 'completed_combinations.pkl'
     try:
-        with open(zip_history_file, 'rb') as f:
-            history = pickle.load(f)
-            logger.info(f"Loaded {len(history)} previously used zip code and body style combinations from history")
-            return history
+        with open(completed_file, 'rb') as f:
+            completed = pickle.load(f)
+            logger.info(f"Loaded {len(completed)} completed zip/body-style combinations from log")
+            return completed
     except FileNotFoundError:
-        logger.info("No zip code and body style combination history found. Starting fresh.")
+        logger.info("No completed combinations log found. Starting fresh.")
         return []
 
-def save_zip_history(history: List[str]):
-    """Save zip code and body style combination history to file"""
-    zip_history_file = 'zip_code_history.pkl'
-    with open(zip_history_file, 'wb') as f:
-        pickle.dump(history, f)
+def save_completed_combinations(completed: List[str]):
+    """Persist completed combinations (zip code + body style) to file"""
+    completed_file = 'completed_combinations.pkl'
+    with open(completed_file, 'wb') as f:
+        pickle.dump(completed, f)
 
 def get_existing_listing_ids(cursor) -> set:
     """Get existing listing IDs from database for duplicate checking"""
@@ -176,10 +175,9 @@ def main():
     # Initialize database connection
     engine, cursor = create_database_connection()
     
-    # Load zip codes and history
+    # Load zip codes and completed combinations log
     unique_zips = load_zip_codes()
-    recently_used_combinations = load_zip_history()
-    max_recent_history = 500
+    completed_combinations = load_completed_combinations()
     
     # Load existing listing IDs for duplicate checking
     existing_ids = get_existing_listing_ids(cursor)
@@ -191,34 +189,29 @@ def main():
     
     # Body styles to cycle through
     body_styles = ['SUV', 'Sedan', 'Coupe', 'Crossover', 'Truck', 'Minivan', 'Wagon', 'Hatchback']
+
+    # Build all possible zip/body-style combinations once
+    all_combinations = [f"{zip_code}-{body_style}" for zip_code in unique_zips for body_style in body_styles]
+    pending_combinations = [combo for combo in all_combinations if combo not in completed_combinations]
     
     logger.info(f"Starting listing collection with {len(unique_zips)} zip codes available")
     
-    for iteration in range(1, max_iterations + 1):
+    if not pending_combinations:
+        logger.info("All zip code and body style combinations have already been completed. Nothing to do.")
+        # Close database connection
+        cursor.close()
+        engine.close()
+        logger.info("Database connection closed")
+        return
+
+    logger.info(f"Starting listing collection with {len(unique_zips)} zip codes available")
+    logger.info(f"Total combinations: {len(all_combinations)} | Completed: {len(completed_combinations)} | Pending: {len(pending_combinations)}")
+
+    for iteration, selected_combination in enumerate(pending_combinations[:max_iterations], start=1):
         session_iterations += 1
-        
-        # Generate all possible zip code and body style combinations
-        all_combinations = [f"{zip_code}-{body_style}" for zip_code in unique_zips for body_style in body_styles]
-        
-        # Choose combination with smart rotation
-        available_combinations = [combo for combo in all_combinations if combo not in recently_used_combinations]
-        
-        if not available_combinations:
-            logger.info("All zip code and body style combinations used recently, resetting history")
-            recently_used_combinations = []
-            available_combinations = all_combinations
-        
-        selected_combination = random.choice(available_combinations)
         zip_code, body_style = selected_combination.split('-', 1)
-        
-        # Update combination history
-        recently_used_combinations.append(selected_combination)
-        if len(recently_used_combinations) > max_recent_history:
-            recently_used_combinations.pop(0)
-        
-        save_zip_history(recently_used_combinations)
-        
-        logger.info(f'[{iteration}] Processing {zip_code} ({body_style}) - History: {len(recently_used_combinations)} combinations')
+
+        logger.info(f'[{iteration}] Processing {zip_code} ({body_style}) - Completed so far: {len(completed_combinations)}')
         
         # Fetch all pages for this zip/body_style combination
         page = 1
@@ -253,6 +246,9 @@ def main():
         try:
             engine.commit()
             logger.info(f'Iteration {iteration} complete: {iteration_new_listings} new listings, {total_pages_processed} pages processed')
+            # Mark this combination as completed only after successful commit
+            completed_combinations.append(selected_combination)
+            save_completed_combinations(completed_combinations)
         except Exception as e:
             logger.error(f"Error committing iteration {iteration}: {e}")
             engine.rollback()
@@ -266,8 +262,9 @@ def main():
     logger.info(f"SESSION SUMMARY:")
     logger.info(f"Total iterations completed: {session_iterations}")
     logger.info(f"Total new listings added: {session_listings_count}")
-    logger.info(f"Zip code and body style combinations used this session: {len(recently_used_combinations)}")
-    logger.info(f"Final combination history size: {len(recently_used_combinations)}")
+    logger.info(f"Combinations completed this session: {min(session_iterations, len(pending_combinations))}")
+    logger.info(f"Cumulative completed combinations: {len(completed_combinations)}")
+    logger.info(f"Remaining combinations: {max(0, len(all_combinations) - len(completed_combinations))}")
     logger.info(f"{'='*60}")
     
     # Close database connection
