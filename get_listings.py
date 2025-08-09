@@ -7,8 +7,10 @@ import psycopg2
 import json
 import time
 import pickle
-from typing import List, Dict, Any
+from typing import List, Dict, Any, Optional
 import logging
+import threading
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 # Set up logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
@@ -23,6 +25,10 @@ db_params = {
     'user': 'postgres',
     'password': 'test'
 }
+
+# Threading locks
+existing_ids_lock = threading.Lock()
+completed_lock = threading.Lock()
 
 def create_database_connection():
     """Create and return database connection with error handling"""
@@ -130,25 +136,33 @@ def fetch_listings_page(api_key: str, zip_code: str, body_style: str, page: int)
         logger.warning(f"Unexpected error on page {page}: {e}")
         return {'records': [], 'has_more': False}
 
-def process_listings_batch(cursor, listings: List[Dict], existing_ids: set) -> int:
+def process_listings_batch(cursor, listings: List[Dict], existing_ids: set, existing_ids_lock: Optional[threading.Lock] = None) -> int:
     """Process a batch of listings and return count of new ones added"""
     new_listings = 0
     batch_inserts = []
     
     for listing in listings:
         listing_id = str(listing.get('id', ''))
-        
-        # Skip if no ID or already exists
-        if not listing_id or listing_id in existing_ids:
+        if not listing_id:
             continue
-        
-        # Prepare for batch insert
+
+        if existing_ids_lock:
+            existing_ids_lock.acquire()
+            try:
+                if listing_id in existing_ids:
+                    continue
+                existing_ids.add(listing_id)
+            finally:
+                existing_ids_lock.release()
+        else:
+            if listing_id in existing_ids:
+                continue
+            existing_ids.add(listing_id)
+
         listing_json = json.dumps(listing)
         batch_inserts.append((listing_json,))
-        existing_ids.add(listing_id)  # Add to set to avoid duplicates in same batch
         new_listings += 1
     
-    # Batch insert all new listings
     if batch_inserts:
         try:
             cursor.executemany(
@@ -158,7 +172,6 @@ def process_listings_batch(cursor, listings: List[Dict], existing_ids: set) -> i
             logger.info(f"Batch inserted {new_listings} new listings")
         except Exception as e:
             logger.error(f"Error in batch insert: {e}")
-            # Fallback to individual inserts
             for listing_json, in batch_inserts:
                 try:
                     cursor.execute(
@@ -169,6 +182,52 @@ def process_listings_batch(cursor, listings: List[Dict], existing_ids: set) -> i
                     logger.warning(f"Failed to insert listing: {insert_error}")
     
     return new_listings
+
+def process_combination_task(
+    selected_combination: str,
+    existing_ids: set,
+    completed_combinations: list,
+    existing_ids_lock: threading.Lock,
+    completed_lock: threading.Lock,
+) -> tuple[int, int, str]:
+    zip_code, body_style = selected_combination.split('-', 1)
+    engine, cursor = create_database_connection()
+    page = 1
+    total_pages_processed = 0
+    total_new_listings = 0
+
+    try:
+        while page <= 50:
+            result = fetch_listings_page(os.getenv('API_KEY'), zip_code, body_style, page)
+            if not result['records']:
+                break
+
+            new_count = process_listings_batch(cursor, result['records'], existing_ids, existing_ids_lock)
+            total_new_listings += new_count
+            total_pages_processed += 1
+
+            if not result['has_more']:
+                break
+
+            page += 1
+            time.sleep(0.5)
+
+        engine.commit()
+
+        # Mark as completed after successful commit
+        with completed_lock:
+            completed_combinations.append(selected_combination)
+            save_completed_combinations(completed_combinations)
+
+        return total_new_listings, total_pages_processed, selected_combination
+
+    except Exception as e:
+        logger.error(f"Error processing {selected_combination}: {e}")
+        engine.rollback()
+        return 0, total_pages_processed, selected_combination
+    finally:
+        cursor.close()
+        engine.close()
 
 def main():
     """Main function to orchestrate the listing collection process"""
@@ -190,72 +249,45 @@ def main():
     # Body styles to cycle through
     body_styles = ['SUV', 'Sedan', 'Coupe', 'Crossover', 'Truck', 'Minivan', 'Wagon', 'Hatchback']
 
-    # Build all possible zip/body-style combinations once
+    # Build all possible combinations and filter pending
     all_combinations = [f"{zip_code}-{body_style}" for zip_code in unique_zips for body_style in body_styles]
     pending_combinations = [combo for combo in all_combinations if combo not in completed_combinations]
-    
-    logger.info(f"Starting listing collection with {len(unique_zips)} zip codes available")
-    
+
     if not pending_combinations:
         logger.info("All zip code and body style combinations have already been completed. Nothing to do.")
-        # Close database connection
         cursor.close()
         engine.close()
         logger.info("Database connection closed")
         return
 
+    max_workers = int(os.getenv('MAX_WORKERS', '4'))
+    worklist = pending_combinations[:max_iterations]
+
     logger.info(f"Starting listing collection with {len(unique_zips)} zip codes available")
     logger.info(f"Total combinations: {len(all_combinations)} | Completed: {len(completed_combinations)} | Pending: {len(pending_combinations)}")
+    logger.info(f"Running with max_workers={max_workers}, queueing {len(worklist)} combinations this run")
 
-    for iteration, selected_combination in enumerate(pending_combinations[:max_iterations], start=1):
-        session_iterations += 1
-        zip_code, body_style = selected_combination.split('-', 1)
+    with ThreadPoolExecutor(max_workers=max_workers) as executor:
+        futures = {
+            executor.submit(
+                process_combination_task,
+                combo,
+                existing_ids,
+                completed_combinations,
+                existing_ids_lock,
+                completed_lock
+            ): combo
+            for combo in worklist
+        }
 
-        logger.info(f'[{iteration}] Processing {zip_code} ({body_style}) - Completed so far: {len(completed_combinations)}')
-        
-        # Fetch all pages for this zip/body_style combination
-        page = 1
-        total_pages_processed = 0
-        iteration_new_listings = 0
-        
-        while page <= 50:  # Safety limit
-            result = fetch_listings_page(os.getenv('API_KEY'), zip_code, body_style, page)
-            
-            if not result['records']:
-                logger.info(f"No more results for {zip_code} {body_style} after page {page-1}")
-                break
-            
-            # Process the listings
-            new_count = process_listings_batch(cursor, result['records'], existing_ids)
-            iteration_new_listings += new_count
-            session_listings_count += new_count
-            total_pages_processed += 1
-            
-            logger.info(f'Page {page}: {new_count} new listings (Iteration total: {iteration_new_listings})')
-            
-            # Check if we should continue to next page
-            if not result['has_more']:
-                break
-            
-            page += 1
-            
-            # Small delay to be respectful to the API
-            time.sleep(0.5)
-        
-        # Commit after each iteration
-        try:
-            engine.commit()
-            logger.info(f'Iteration {iteration} complete: {iteration_new_listings} new listings, {total_pages_processed} pages processed')
-            # Mark this combination as completed only after successful commit
-            completed_combinations.append(selected_combination)
-            save_completed_combinations(completed_combinations)
-        except Exception as e:
-            logger.error(f"Error committing iteration {iteration}: {e}")
-            engine.rollback()
-        
-        # Progress update every 10 iterations
-        if iteration % 10 == 0:
-            logger.info(f"Progress: {iteration}/{max_iterations} iterations, {session_listings_count} total new listings")
+        for i, future in enumerate(as_completed(futures), start=1):
+            try:
+                new_count, pages, combo = future.result()
+                session_listings_count += new_count
+                session_iterations += 1
+                logger.info(f"[{i}/{len(worklist)}] Completed {combo}: {new_count} new listings, {pages} pages")
+            except Exception as e:
+                logger.error(f"Worker failed: {e}")
     
     # Final summary
     logger.info(f"\n{'='*60}")
@@ -266,6 +298,7 @@ def main():
     logger.info(f"Cumulative completed combinations: {len(completed_combinations)}")
     logger.info(f"Remaining combinations: {max(0, len(all_combinations) - len(completed_combinations))}")
     logger.info(f"{'='*60}")
+    logger.info(f"Used max_workers={max_workers}")
     
     # Close database connection
     cursor.close()
