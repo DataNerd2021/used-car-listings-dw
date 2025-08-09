@@ -11,6 +11,9 @@ from typing import List, Dict, Any, Optional
 import logging
 import threading
 from concurrent.futures import ThreadPoolExecutor, as_completed
+import random
+from requests.adapters import HTTPAdapter
+from urllib3.util.retry import Retry
 
 # Set up logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
@@ -29,6 +32,57 @@ db_params = {
 # Threading locks
 existing_ids_lock = threading.Lock()
 completed_lock = threading.Lock()
+
+# Rate limit config (env-tunable)
+API_RPS = float(os.getenv('API_RPS', '1.0'))           # allowed requests per second across all threads
+API_BURST = int(os.getenv('API_BURST', '2'))           # burst capacity for token bucket
+API_MAX_RETRIES = int(os.getenv('API_MAX_RETRIES', '5'))
+PAGE_DELAY_SECONDS = float(os.getenv('PAGE_DELAY_SECONDS', '0.5'))  # base delay between pages
+JITTER_SECONDS = float(os.getenv('JITTER_SECONDS', '0.3'))
+
+class RateLimiter:
+    def __init__(self, rate: float, burst: int):
+        self.rate = max(rate, 0.1)
+        self.capacity = max(burst, 1)
+        self.tokens = self.capacity
+        self.updated_at = time.monotonic()
+        self.lock = threading.Lock()
+    def acquire(self):
+        while True:
+            with self.lock:
+                now = time.monotonic()
+                elapsed = now - self.updated_at
+                self.updated_at = now
+                self.tokens = min(self.capacity, self.tokens + elapsed * self.rate)
+                if self.tokens >= 1.0:
+                    self.tokens -= 1.0
+                    return
+                need = (1.0 - self.tokens) / self.rate
+            time.sleep(need)
+
+rate_limiter = RateLimiter(API_RPS, API_BURST)
+
+# Per-thread HTTP session with retries
+_thread_local = threading.local()
+
+def get_session() -> requests.Session:
+    s = getattr(_thread_local, 'session', None)
+    if s is not None:
+        return s
+    s = requests.Session()
+    retries = Retry(
+        total=API_MAX_RETRIES,
+        backoff_factor=0.5,  # base exponential backoff for retryable codes
+        status_forcelist=[429, 500, 502, 503, 504],
+        allowed_methods=["GET"],
+        raise_on_status=False,
+        respect_retry_after_header=True,
+    )
+    adapter = HTTPAdapter(max_retries=retries, pool_connections=10, pool_maxsize=10)
+    s.mount('https://', adapter)
+    s.mount('http://', adapter)
+    _thread_local.session = s
+    return s
 
 def create_database_connection():
     """Create and return database connection with error handling"""
@@ -97,44 +151,53 @@ def get_existing_listing_ids(cursor) -> set:
         return set()
 
 def fetch_listings_page(api_key: str, zip_code: str, body_style: str, page: int) -> Dict[str, Any]:
-    """Fetch a single page of listings with proper error handling"""
+    """Fetch a single page of listings with proper error handling and backoff"""
     url = f"https://auto.dev/api/listings?apikey={api_key}&body_style[]={body_style}&page={page}&zip={zip_code}"
-    
-    try:
-        response = requests.get(url, timeout=30)
-        response.raise_for_status()
-        
-        data = response.json()
-        
-        # Check if page has results
-        if not data.get('records') or len(data['records']) == 0:
-            logger.info(f"No results found for page {page} (zip: {zip_code}, body_style: {body_style})")
+
+    session = get_session()
+    attempt = 0
+    while attempt < API_MAX_RETRIES:
+        attempt += 1
+        try:
+            # Global rate limit across threads
+            rate_limiter.acquire()
+
+            resp = session.get(url, timeout=30)
+            if resp.status_code == 429:
+                # Honor Retry-After if present; else exponential backoff + jitter
+                retry_after = resp.headers.get('Retry-After')
+                if retry_after:
+                    try:
+                        wait_s = float(retry_after)
+                    except ValueError:
+                        wait_s = min(60.0, 2 ** attempt)
+                else:
+                    wait_s = min(60.0, 2 ** attempt)
+                wait_s += random.uniform(0, JITTER_SECONDS)
+                logger.warning(f"429 received for {zip_code}/{body_style} page {page}. Backing off {wait_s:.2f}s (attempt {attempt}/{API_MAX_RETRIES})")
+                time.sleep(wait_s)
+                continue
+
+            resp.raise_for_status()
+            data = resp.json()
+
+            if not data.get('records') or len(data['records']) == 0:
+                logger.info(f"No results found for page {page} (zip: {zip_code}, body_style: {body_style})")
+                return {'records': [], 'has_more': False}
+
+            has_more = len(data['records']) > 0 and page < 50  # Safety limit
+            return {'records': data['records'], 'has_more': has_more}
+
+        except (requests.exceptions.RequestException, json.JSONDecodeError) as e:
+            wait_s = min(60.0, 2 ** attempt) + random.uniform(0, JITTER_SECONDS)
+            logger.warning(f"Transient error on {zip_code}/{body_style} page {page}: {e} — retrying in {wait_s:.2f}s (attempt {attempt}/{API_MAX_RETRIES})")
+            time.sleep(wait_s)
+        except Exception as e:
+            logger.warning(f"Unexpected error on page {page}: {e}")
             return {'records': [], 'has_more': False}
-        
-        # Check if there are more pages
-        has_more = len(data['records']) > 0 and page < 50  # Safety limit
-        
-        return {
-            'records': data['records'],
-            'has_more': has_more
-        }
-        
-    except requests.exceptions.HTTPError as e:
-        if response.status_code == 404:
-            logger.info(f"Page {page} not found (404) - skipping")
-            return {'records': [], 'has_more': False}
-        else:
-            logger.warning(f"HTTP error on page {page}: {e}")
-            return {'records': [], 'has_more': False}
-    except requests.exceptions.RequestException as e:
-        logger.warning(f"Request error on page {page}: {e}")
-        return {'records': [], 'has_more': False}
-    except json.JSONDecodeError as e:
-        logger.warning(f"JSON decode error on page {page}: {e}")
-        return {'records': [], 'has_more': False}
-    except Exception as e:
-        logger.warning(f"Unexpected error on page {page}: {e}")
-        return {'records': [], 'has_more': False}
+
+    logger.error(f"Exhausted retries for {zip_code}/{body_style} page {page}")
+    return {'records': [], 'has_more': False}
 
 def process_listings_batch(cursor, listings: List[Dict], existing_ids: set, existing_ids_lock: Optional[threading.Lock] = None) -> int:
     """Process a batch of listings and return count of new ones added"""
@@ -210,7 +273,7 @@ def process_combination_task(
                 break
 
             page += 1
-            time.sleep(0.5)
+            time.sleep(PAGE_DELAY_SECONDS + random.uniform(0, JITTER_SECONDS))
 
         engine.commit()
 
@@ -260,7 +323,7 @@ def main():
         logger.info("Database connection closed")
         return
 
-    max_workers = int(os.getenv('MAX_WORKERS', '4'))
+    max_workers = int(os.getenv('MAX_WORKERS', str(max(1, min(8, int(API_BURST * 2))))))  # default scales with burst
     worklist = pending_combinations[:max_iterations]
 
     logger.info(f"Starting listing collection with {len(unique_zips)} zip codes available")
