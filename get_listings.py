@@ -98,6 +98,11 @@ def create_database_connection():
             );
         """)
         
+        cursor.execute("""
+            CREATE UNIQUE INDEX IF NOT EXISTS uniq_raw_listings_listing_id
+            ON raw_listings_json ((listing->>'id'));
+        """)
+        
         
         engine.commit()
         logger.info("Database connection established successfully")
@@ -201,22 +206,41 @@ def fetch_listings_page(api_key: str, zip_code: str, body_style: str, page: int)
 
 def process_listings_batch(cursor, listings: List[Dict], existing_ids: set, existing_ids_lock: Optional[threading.Lock] = None) -> int:
     """Process a batch of listings and return count of new ones added"""
+    # Gather candidate IDs
+    candidates = []
+    for listing in listings:
+        listing_id = str(listing.get('id', ''))
+        if listing_id:
+            candidates.append(listing_id)
+
+    # DB pre-check: remove IDs already in table
+    db_existing = set()
+    if candidates:
+        try:
+            cursor.execute(
+                "SELECT listing->>'id' FROM raw_listings_json WHERE listing->>'id' = ANY(%s);",
+                (candidates,)
+            )
+            db_existing = {row[0] for row in cursor.fetchall()}
+        except Exception as e:
+            logger.warning(f"DB pre-check failed, proceeding without it: {e}")
+
     new_listings = 0
     batch_inserts = []
-    
+
     for listing in listings:
         listing_id = str(listing.get('id', ''))
         if not listing_id:
             continue
+        if listing_id in db_existing:
+            continue
 
+        # Thread-safe in-memory de-dupe
         if existing_ids_lock:
-            existing_ids_lock.acquire()
-            try:
+            with existing_ids_lock:
                 if listing_id in existing_ids:
                     continue
                 existing_ids.add(listing_id)
-            finally:
-                existing_ids_lock.release()
         else:
             if listing_id in existing_ids:
                 continue
@@ -225,25 +249,26 @@ def process_listings_batch(cursor, listings: List[Dict], existing_ids: set, exis
         listing_json = json.dumps(listing)
         batch_inserts.append((listing_json,))
         new_listings += 1
-    
+
     if batch_inserts:
         try:
             cursor.executemany(
-                "INSERT INTO raw_listings_json(listing) VALUES(%s);",
+                "INSERT INTO raw_listings_json(listing) VALUES (%s) ON CONFLICT DO NOTHING;",
                 batch_inserts
             )
             logger.info(f"Batch inserted {new_listings} new listings")
         except Exception as e:
             logger.error(f"Error in batch insert: {e}")
+            # Fallback to individual inserts with conflict-safe clause
             for listing_json, in batch_inserts:
                 try:
                     cursor.execute(
-                        "INSERT INTO raw_listings_json(listing) VALUES(%s);",
+                        "INSERT INTO raw_listings_json(listing) VALUES (%s) ON CONFLICT DO NOTHING;",
                         (listing_json,)
                     )
                 except Exception as insert_error:
                     logger.warning(f"Failed to insert listing: {insert_error}")
-    
+
     return new_listings
 
 def process_combination_task(
@@ -348,7 +373,7 @@ def main():
                 new_count, pages, combo = future.result()
                 session_listings_count += new_count
                 session_iterations += 1
-                logger.info(f"[{i}/{len(worklist)}] Completed {combo}: {new_count} new listings, {pages} pages")
+                logger.info(f"[{i}/{len(worklist)}] Completed {combo}: {new_count} new listings, {pages} pages — session total: {session_listings_count}")
             except Exception as e:
                 logger.error(f"Worker failed: {e}")
     
