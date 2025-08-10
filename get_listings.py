@@ -185,7 +185,7 @@ def get_existing_listing_ids(cursor) -> set:
 
 def fetch_listings_page(api_key: str, zip_code: str, body_style: str, page: int) -> Dict[str, Any]:
     """Fetch a single page of listings with proper error handling and backoff"""
-    url = f"https://auto.dev/api/listings?apikey={api_key}&body_style[]={body_style}&page={page}&zip={zip_code}"
+    url = f"https://auto.dev/api/listings?apikey={api_key}&body_style[]={body_style}&page={page}&zip={zip_code}&sort_filter=created_at:desc"
 
     session = get_session()
     attempt = 0
@@ -233,7 +233,7 @@ def fetch_listings_page(api_key: str, zip_code: str, body_style: str, page: int)
     return {'records': [], 'has_more': False}
 
 def process_listings_batch(cursor, listings: List[Dict], existing_ids: set, existing_ids_lock: Optional[threading.Lock] = None) -> int:
-    """Process a batch of listings and return count of new ones added - OPTIMIZED VERSION"""
+    """Process a batch of listings and return count of new ones added - WITH RETURNING VALIDATION"""
     new_listings = 0
     batch_inserts = []
 
@@ -255,26 +255,23 @@ def process_listings_batch(cursor, listings: List[Dict], existing_ids: set, exis
 
         listing_json = json.dumps(listing)
         batch_inserts.append((listing_json,))
-        new_listings += 1
 
     if batch_inserts:
         try:
-            cursor.executemany(
-                "INSERT INTO raw_listings_json(listing) VALUES (%s) ON CONFLICT DO NOTHING;",
-                batch_inserts
-            )
-            logger.info(f"Batch inserted {new_listings} new listings")
+            # Use individual inserts with RETURNING to get exact count
+            for listing_json, in batch_inserts:
+                cursor.execute(
+                    "INSERT INTO raw_listings_json(listing) VALUES (%s) ON CONFLICT DO NOTHING RETURNING id;",
+                    (listing_json,)
+                )
+                # If a row was returned, it was actually inserted
+                if cursor.fetchone() is not None:
+                    new_listings += 1
+            
+            logger.info(f"Batch processed {len(batch_inserts)} listings, actually inserted {new_listings} new listings")
+            
         except Exception as e:
             logger.error(f"Error in batch insert: {e}")
-            # Fallback to individual inserts with conflict-safe clause
-            for listing_json, in batch_inserts:
-                try:
-                    cursor.execute(
-                        "INSERT INTO raw_listings_json(listing) VALUES (%s) ON CONFLICT DO NOTHING;",
-                        (listing_json,)
-                    )
-                except Exception as insert_error:
-                    logger.warning(f"Failed to insert listing: {insert_error}")
 
     return new_listings
 
