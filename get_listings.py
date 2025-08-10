@@ -233,25 +233,15 @@ def fetch_listings_page(api_key: str, zip_code: str, body_style: str, page: int)
     return {'records': [], 'has_more': False}
 
 def process_listings_batch(cursor, listings: List[Dict], existing_ids: set, existing_ids_lock: Optional[threading.Lock] = None) -> int:
-    """Process a batch of listings and return count of new ones added - WITH RETURNING VALIDATION"""
+    """Process a batch of listings and return count of new ones added - CORRECTED VERSION"""
     new_listings = 0
     batch_inserts = []
 
+    # Prepare all listings for insertion (let database handle duplicates)
     for listing in listings:
         listing_id = str(listing.get('id', ''))
         if not listing_id:
             continue
-
-        # Thread-safe in-memory de-dupe (simplified)
-        if existing_ids_lock:
-            with existing_ids_lock:
-                if listing_id in existing_ids:
-                    continue
-                existing_ids.add(listing_id)
-        else:
-            if listing_id in existing_ids:
-                continue
-            existing_ids.add(listing_id)
 
         listing_json = json.dumps(listing)
         batch_inserts.append((listing_json,))
