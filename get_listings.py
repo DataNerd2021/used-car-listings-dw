@@ -14,6 +14,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 import random
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
+from psycopg2 import pool
 
 # Set up logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
@@ -28,6 +29,34 @@ db_params = {
     'user': 'postgres',
     'password': 'test'
 }
+
+# Database connection pool
+db_pool = None
+
+def initialize_db_pool():
+    """Initialize the database connection pool"""
+    global db_pool
+    try:
+        db_pool = pool.ThreadedConnectionPool(
+            minconn=1,
+            maxconn=20,  # Adjust based on MAX_WORKERS
+            **db_params
+        )
+        logger.info("Database connection pool initialized")
+    except Exception as e:
+        logger.error(f"Failed to initialize connection pool: {e}")
+        raise
+
+def get_db_connection():
+    """Get a connection from the pool"""
+    if db_pool is None:
+        initialize_db_pool()
+    return db_pool.getconn()
+
+def return_db_connection(conn):
+    """Return a connection to the pool"""
+    if db_pool is not None:
+        db_pool.putconn(conn)
 
 # Threading locks
 existing_ids_lock = threading.Lock()
@@ -87,7 +116,7 @@ def get_session() -> requests.Session:
 def create_database_connection():
     """Create and return database connection with error handling"""
     try:
-        engine = psycopg2.connect(**db_params)
+        engine = get_db_connection()
         cursor = engine.cursor()
         
         # Ensure the table exists with current schema
@@ -102,7 +131,6 @@ def create_database_connection():
             CREATE UNIQUE INDEX IF NOT EXISTS uniq_raw_listings_listing_id
             ON raw_listings_json ((listing->>'id'));
         """)
-        
         
         engine.commit()
         logger.info("Database connection established successfully")
@@ -205,26 +233,7 @@ def fetch_listings_page(api_key: str, zip_code: str, body_style: str, page: int)
     return {'records': [], 'has_more': False}
 
 def process_listings_batch(cursor, listings: List[Dict], existing_ids: set, existing_ids_lock: Optional[threading.Lock] = None) -> int:
-    """Process a batch of listings and return count of new ones added"""
-    # Gather candidate IDs
-    candidates = []
-    for listing in listings:
-        listing_id = str(listing.get('id', ''))
-        if listing_id:
-            candidates.append(listing_id)
-
-    # DB pre-check: remove IDs already in table
-    db_existing = set()
-    if candidates:
-        try:
-            cursor.execute(
-                "SELECT listing->>'id' FROM raw_listings_json WHERE listing->>'id' = ANY(%s);",
-                (candidates,)
-            )
-            db_existing = {row[0] for row in cursor.fetchall()}
-        except Exception as e:
-            logger.warning(f"DB pre-check failed, proceeding without it: {e}")
-
+    """Process a batch of listings and return count of new ones added - OPTIMIZED VERSION"""
     new_listings = 0
     batch_inserts = []
 
@@ -232,10 +241,8 @@ def process_listings_batch(cursor, listings: List[Dict], existing_ids: set, exis
         listing_id = str(listing.get('id', ''))
         if not listing_id:
             continue
-        if listing_id in db_existing:
-            continue
 
-        # Thread-safe in-memory de-dupe
+        # Thread-safe in-memory de-dupe (simplified)
         if existing_ids_lock:
             with existing_ids_lock:
                 if listing_id in existing_ids:
@@ -283,6 +290,10 @@ def process_combination_task(
     page = 1
     total_pages_processed = 0
     total_new_listings = 0
+    
+    # OPTIMIZATION: Accumulate multiple pages before inserting
+    accumulated_listings = []
+    batch_size = 5  # Process 5 pages before inserting
 
     try:
         while page <= 50:
@@ -290,15 +301,27 @@ def process_combination_task(
             if not result['records']:
                 break
 
-            new_count = process_listings_batch(cursor, result['records'], existing_ids, existing_ids_lock)
-            total_new_listings += new_count
+            # Accumulate listings instead of processing immediately
+            accumulated_listings.extend(result['records'])
             total_pages_processed += 1
+
+            # Insert when we have enough pages or at the end
+            if len(accumulated_listings) >= batch_size * 20 or not result['has_more']:  # Assume ~20 listings per page
+                if accumulated_listings:
+                    new_count = process_listings_batch(cursor, accumulated_listings, existing_ids, existing_ids_lock)
+                    total_new_listings += new_count
+                    accumulated_listings = []  # Clear after processing
 
             if not result['has_more']:
                 break
 
             page += 1
             time.sleep(PAGE_DELAY_SECONDS + random.uniform(0, JITTER_SECONDS))
+
+        # Process any remaining accumulated listings
+        if accumulated_listings:
+            new_count = process_listings_batch(cursor, accumulated_listings, existing_ids, existing_ids_lock)
+            total_new_listings += new_count
 
         engine.commit()
 
@@ -315,19 +338,19 @@ def process_combination_task(
         return 0, total_pages_processed, selected_combination
     finally:
         cursor.close()
-        engine.close()
+        return_db_connection(engine)  # Return to pool instead of closing
 
 def main():
-    """Main function to orchestrate the listing collection process"""
-    # Initialize database connection
-    engine, cursor = create_database_connection()
+    """Main function to orchestrate the listing collection process - OPTIMIZED VERSION"""
+    # Initialize database connection pool
+    initialize_db_pool()
     
     # Load zip codes and completed combinations log
     unique_zips = load_zip_codes()
     completed_combinations = load_completed_combinations()
     
-    # Load existing listing IDs for duplicate checking
-    existing_ids = get_existing_listing_ids(cursor)
+    # OPTIMIZATION: Skip loading existing IDs since we have DB-level uniqueness
+    existing_ids = set()  # Start with empty set, let DB handle duplicates
     
     # Session tracking
     session_listings_count = 0
@@ -343,15 +366,12 @@ def main():
 
     if not pending_combinations:
         logger.info("All zip code and body style combinations have already been completed. Nothing to do.")
-        cursor.close()
-        engine.close()
-        logger.info("Database connection closed")
         return
 
-    max_workers = int(os.getenv('MAX_WORKERS', str(max(1, min(8, int(API_BURST * 2))))))  # default scales with burst
+    max_workers = int(os.getenv('MAX_WORKERS', str(max(1, min(8, int(API_BURST * 2))))))
     worklist = pending_combinations[:max_iterations]
 
-    logger.info(f"Starting listing collection with {len(unique_zips)} zip codes available")
+    logger.info(f"Starting OPTIMIZED listing collection with {len(unique_zips)} zip codes available")
     logger.info(f"Total combinations: {len(all_combinations)} | Completed: {len(completed_combinations)} | Pending: {len(pending_combinations)}")
     logger.info(f"Running with max_workers={max_workers}, queueing {len(worklist)} combinations this run")
 
@@ -379,7 +399,7 @@ def main():
     
     # Final summary
     logger.info(f"\n{'='*60}")
-    logger.info(f"SESSION SUMMARY:")
+    logger.info(f"OPTIMIZED SESSION SUMMARY:")
     logger.info(f"Total iterations completed: {session_iterations}")
     logger.info(f"Total new listings added: {session_listings_count}")
     logger.info(f"Combinations completed this session: {min(session_iterations, len(pending_combinations))}")
@@ -388,10 +408,10 @@ def main():
     logger.info(f"{'='*60}")
     logger.info(f"Used max_workers={max_workers}")
     
-    # Close database connection
-    cursor.close()
-    engine.close()
-    logger.info("Database connection closed")
+    # Clean up connection pool
+    if db_pool is not None:
+        db_pool.closeall()
+    logger.info("Database connection pool closed")
 
 if __name__ == "__main__":
     main()
