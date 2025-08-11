@@ -343,6 +343,7 @@ def main():
     session_listings_count = 0
     session_iterations = 0
     max_iterations = 500
+    session_start_time = time.time()  # Track session start time
     
     # Body styles to cycle through
     body_styles = ['SUV', 'Sedan', 'Coupe', 'Crossover', 'Truck', 'Minivan', 'Wagon', 'Hatchback']
@@ -380,9 +381,27 @@ def main():
                 new_count, pages, combo = future.result()
                 session_listings_count += new_count
                 session_iterations += 1
-                logger.info(f"[{i}/{len(worklist)}] Completed {combo}: {new_count} new listings, {pages} pages — session total: {session_listings_count}")
+                
+                # Calculate elapsed time
+                elapsed_time = time.time() - session_start_time
+                elapsed_hours = int(elapsed_time // 3600)
+                elapsed_minutes = int((elapsed_time % 3600) // 60)
+                elapsed_seconds = int(elapsed_time % 60)
+                
+                # Show elapsed time every 10 iterations
+                if session_iterations % 10 == 0:
+                    logger.info(f"[{i}/{len(worklist)}] Completed {combo}: {new_count} new listings, {pages} pages — session total: {session_listings_count} | Elapsed: {elapsed_hours:02d}:{elapsed_minutes:02d}:{elapsed_seconds:02d}")
+                else:
+                    logger.info(f"[{i}/{len(worklist)}] Completed {combo}: {new_count} new listings, {pages} pages — session total: {session_listings_count}")
+                    
             except Exception as e:
                 logger.error(f"Worker failed: {e}")
+    
+    # Calculate final elapsed time
+    total_elapsed_time = time.time() - session_start_time
+    total_hours = int(total_elapsed_time // 3600)
+    total_minutes = int((total_elapsed_time % 3600) // 60)
+    total_seconds = int(total_elapsed_time % 60)
     
     # Final summary
     logger.info(f"\n{'='*60}")
@@ -392,6 +411,7 @@ def main():
     logger.info(f"Combinations completed this session: {min(session_iterations, len(pending_combinations))}")
     logger.info(f"Cumulative completed combinations: {len(completed_combinations)}")
     logger.info(f"Remaining combinations: {max(0, len(all_combinations) - len(completed_combinations))}")
+    logger.info(f"Total session time: {total_hours:02d}:{total_minutes:02d}:{total_seconds:02d}")
     logger.info(f"{'='*60}")
     logger.info(f"Used max_workers={max_workers}")
     
