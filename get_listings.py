@@ -265,6 +265,29 @@ def process_listings_batch(cursor, listings: List[Dict], existing_ids: set, exis
 
     return new_listings
 
+def process_listings_batch_optimized(cursor, listings: List[Dict]) -> int:
+    if not listings:
+        return 0
+    
+    # Get count before insertion
+    cursor.execute("SELECT COUNT(*) FROM raw_listings_json;")
+    count_before = cursor.fetchone()[0]
+    
+    # Prepare batch insert
+    batch_data = [(json.dumps(listing),) for listing in listings if listing.get('id')]
+    
+    # Execute batch insert
+    cursor.executemany(
+        "INSERT INTO raw_listings_json(listing) VALUES (%s) ON CONFLICT DO NOTHING;",
+        batch_data
+    )
+    
+    # Get count after insertion
+    cursor.execute("SELECT COUNT(*) FROM raw_listings_json;")
+    count_after = cursor.fetchone()[0]
+    
+    return count_after - count_before
+
 def process_combination_task(
     selected_combination: str,
     existing_ids: set,
@@ -280,7 +303,7 @@ def process_combination_task(
     
     # OPTIMIZATION: Accumulate multiple pages before inserting
     accumulated_listings = []
-    batch_size = 5  # Process 5 pages before inserting
+    batch_size = 15  # Process 15 pages before inserting
 
     try:
         while page <= 50:
@@ -326,6 +349,25 @@ def process_combination_task(
     finally:
         cursor.close()
         return_db_connection(engine)  # Return to pool instead of closing
+
+def prioritize_combinations(combinations, zip_population_data):
+    """Prioritize zip codes with higher population for better yield"""
+    scored_combinations = []
+    for combo in combinations:
+        zip_code = combo.split('-')[0]
+        population = zip_population_data.get(zip_code, 1000)
+        score = population  # Higher population = higher priority
+        scored_combinations.append((score, combo))
+    
+    return [combo for _, combo in sorted(scored_combinations, reverse=True)]
+
+def get_adaptive_delay(last_response_time, error_count):
+    base_delay = PAGE_DELAY_SECONDS
+    if error_count > 0:
+        base_delay *= (1 + error_count * 0.5)  # Exponential backoff
+    if last_response_time > 2.0:  # Slow response
+        base_delay *= 1.2
+    return base_delay + random.uniform(0, JITTER_SECONDS)
 
 def main():
     """Main function to orchestrate the listing collection process - OPTIMIZED VERSION"""
