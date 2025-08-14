@@ -384,7 +384,7 @@ def main():
     # Session tracking
     session_listings_count = 0
     session_iterations = 0
-    max_iterations = 500
+    max_iterations = 100
     session_start_time = time.time()  # Track session start time
     
     # Body styles to cycle through
