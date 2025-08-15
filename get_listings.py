@@ -384,7 +384,7 @@ def main():
     # Session tracking
     session_listings_count = 0
     session_iterations = 0
-    max_iterations = 100
+    max_iterations = input('Enter Number of Iternations: ')
     session_start_time = time.time()  # Track session start time
     
     # Body styles to cycle through
