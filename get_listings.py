@@ -9,12 +9,9 @@ import time
 import pickle
 from typing import List, Dict, Any, Optional
 import logging
-import threading
-from concurrent.futures import ThreadPoolExecutor, as_completed
 import random
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
-from psycopg2 import pool
 
 # Set up logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
@@ -30,74 +27,34 @@ db_params = {
     'password': 'test'
 }
 
-# Database connection pool
-db_pool = None
 
-def initialize_db_pool():
-    """Initialize the database connection pool"""
-    global db_pool
-    try:
-        db_pool = pool.ThreadedConnectionPool(
-            minconn=1,
-            maxconn=20,  # Adjust based on MAX_WORKERS
-            **db_params
-        )
-        logger.info("Database connection pool initialized")
-    except Exception as e:
-        logger.error(f"Failed to initialize connection pool: {e}")
-        raise
 
-def get_db_connection():
-    """Get a connection from the pool"""
-    if db_pool is None:
-        initialize_db_pool()
-    return db_pool.getconn()
 
-def return_db_connection(conn):
-    """Return a connection to the pool"""
-    if db_pool is not None:
-        db_pool.putconn(conn)
-
-# Threading locks
-existing_ids_lock = threading.Lock()
-completed_lock = threading.Lock()
 
 # Rate limit config (env-tunable)
-API_RPS = float(os.getenv('API_RPS', '1.0'))           # allowed requests per second across all threads
-API_BURST = int(os.getenv('API_BURST', '2'))           # burst capacity for token bucket
+API_RPS = float(os.getenv('API_RPS', '1.0'))           # allowed requests per second
 API_MAX_RETRIES = int(os.getenv('API_MAX_RETRIES', '5'))
 PAGE_DELAY_SECONDS = float(os.getenv('PAGE_DELAY_SECONDS', '0.5'))  # base delay between pages
 JITTER_SECONDS = float(os.getenv('JITTER_SECONDS', '0.3'))
 
 class RateLimiter:
-    def __init__(self, rate: float, burst: int):
+    def __init__(self, rate: float):
         self.rate = max(rate, 0.1)
-        self.capacity = max(burst, 1)
-        self.tokens = self.capacity
-        self.updated_at = time.monotonic()
-        self.lock = threading.Lock()
+        self.last_request_time = 0
+        self.min_interval = 1.0 / self.rate
+    
     def acquire(self):
-        while True:
-            with self.lock:
-                now = time.monotonic()
-                elapsed = now - self.updated_at
-                self.updated_at = now
-                self.tokens = min(self.capacity, self.tokens + elapsed * self.rate)
-                if self.tokens >= 1.0:
-                    self.tokens -= 1.0
-                    return
-                need = (1.0 - self.tokens) / self.rate
-            time.sleep(need)
+        now = time.monotonic()
+        time_since_last = now - self.last_request_time
+        if time_since_last < self.min_interval:
+            sleep_time = self.min_interval - time_since_last
+            time.sleep(sleep_time)
+        self.last_request_time = time.monotonic()
 
-rate_limiter = RateLimiter(API_RPS, API_BURST)
+rate_limiter = RateLimiter(API_RPS)
 
-# Per-thread HTTP session with retries
-_thread_local = threading.local()
-
+# HTTP session with retries
 def get_session() -> requests.Session:
-    s = getattr(_thread_local, 'session', None)
-    if s is not None:
-        return s
     s = requests.Session()
     retries = Retry(
         total=API_MAX_RETRIES,
@@ -110,13 +67,12 @@ def get_session() -> requests.Session:
     adapter = HTTPAdapter(max_retries=retries, pool_connections=10, pool_maxsize=10)
     s.mount('https://', adapter)
     s.mount('http://', adapter)
-    _thread_local.session = s
     return s
 
 def create_database_connection():
     """Create and return database connection with error handling"""
     try:
-        engine = get_db_connection()
+        engine = psycopg2.connect(**db_params)
         cursor = engine.cursor()
         
         # Ensure the table exists with current schema
@@ -172,16 +128,7 @@ def save_completed_combinations(completed: List[str]):
     with open(completed_file, 'wb') as f:
         pickle.dump(completed, f)
 
-def get_existing_listing_ids(cursor) -> set:
-    """Get existing listing IDs from database for duplicate checking"""
-    try:
-        cursor.execute("SELECT listing->>'id' FROM raw_listings_json WHERE listing->>'id' IS NOT NULL;")
-        existing_ids = {row[0] for row in cursor.fetchall()}
-        logger.info(f"Loaded {len(existing_ids)} existing listing IDs for duplicate checking")
-        return existing_ids
-    except Exception as e:
-        logger.warning(f"Could not load existing listing IDs: {e}")
-        return set()
+
 
 def fetch_listings_page(api_key: str, zip_code: str, body_style: str, page: int) -> Dict[str, Any]:
     """Fetch a single page of listings with proper error handling and backoff"""
@@ -232,40 +179,8 @@ def fetch_listings_page(api_key: str, zip_code: str, body_style: str, page: int)
     logger.error(f"Exhausted retries for {zip_code}/{body_style} page {page}")
     return {'records': [], 'has_more': False}
 
-def process_listings_batch(cursor, listings: List[Dict], existing_ids: set, existing_ids_lock: Optional[threading.Lock] = None) -> int:
-    """Process a batch of listings and return count of new ones added - CORRECTED VERSION"""
-    new_listings = 0
-    batch_inserts = []
-
-    # Prepare all listings for insertion (let database handle duplicates)
-    for listing in listings:
-        listing_id = str(listing.get('id', ''))
-        if not listing_id:
-            continue
-
-        listing_json = json.dumps(listing)
-        batch_inserts.append((listing_json,))
-
-    if batch_inserts:
-        try:
-            # Use individual inserts with RETURNING to get exact count
-            for listing_json, in batch_inserts:
-                cursor.execute(
-                    "INSERT INTO raw_listings_json(listing) VALUES (%s) ON CONFLICT DO NOTHING RETURNING id;",
-                    (listing_json,)
-                )
-                # If a row was returned, it was actually inserted
-                if cursor.fetchone() is not None:
-                    new_listings += 1
-            
-            logger.info(f"Batch processed {len(batch_inserts)} listings, actually inserted {new_listings} new listings")
-            
-        except Exception as e:
-            logger.error(f"Error in batch insert: {e}")
-
-    return new_listings
-
-def process_listings_batch_optimized(cursor, listings: List[Dict]) -> int:
+def process_listings_batch(cursor, listings: List[Dict]) -> int:
+    """Process a batch of listings and return count of new ones added"""
     if not listings:
         return 0
     
@@ -288,20 +203,17 @@ def process_listings_batch_optimized(cursor, listings: List[Dict]) -> int:
     
     return count_after - count_before
 
-def process_combination_task(
-    selected_combination: str,
-    existing_ids: set,
-    completed_combinations: list,
-    existing_ids_lock: threading.Lock,
-    completed_lock: threading.Lock,
-) -> tuple[int, int, str]:
-    zip_code, body_style = selected_combination.split('-', 1)
+
+
+def process_combination(zip_code: str, body_style: str, completed_combinations: list) -> tuple[int, int]:
+    """Process a single zip code and body style combination"""
+    combination = f"{zip_code}-{body_style}"
     engine, cursor = create_database_connection()
     page = 1
     total_pages_processed = 0
     total_new_listings = 0
     
-    # OPTIMIZATION: Accumulate multiple pages before inserting
+    # Accumulate multiple pages before inserting
     accumulated_listings = []
     batch_size = 15  # Process 15 pages before inserting
 
@@ -318,7 +230,7 @@ def process_combination_task(
             # Insert when we have enough pages or at the end
             if len(accumulated_listings) >= batch_size * 20 or not result['has_more']:  # Assume ~20 listings per page
                 if accumulated_listings:
-                    new_count = process_listings_batch(cursor, accumulated_listings, existing_ids, existing_ids_lock)
+                    new_count = process_listings_batch(cursor, accumulated_listings)
                     total_new_listings += new_count
                     accumulated_listings = []  # Clear after processing
 
@@ -330,56 +242,32 @@ def process_combination_task(
 
         # Process any remaining accumulated listings
         if accumulated_listings:
-            new_count = process_listings_batch(cursor, accumulated_listings, existing_ids, existing_ids_lock)
+            new_count = process_listings_batch(cursor, accumulated_listings)
             total_new_listings += new_count
 
         engine.commit()
 
         # Mark as completed after successful commit
-        with completed_lock:
-            completed_combinations.append(selected_combination)
-            save_completed_combinations(completed_combinations)
+        completed_combinations.append(combination)
+        save_completed_combinations(completed_combinations)
 
-        return total_new_listings, total_pages_processed, selected_combination
+        return total_new_listings, total_pages_processed
 
     except Exception as e:
-        logger.error(f"Error processing {selected_combination}: {e}")
+        logger.error(f"Error processing {combination}: {e}")
         engine.rollback()
-        return 0, total_pages_processed, selected_combination
+        return 0, total_pages_processed
     finally:
         cursor.close()
-        return_db_connection(engine)  # Return to pool instead of closing
+        engine.close()
 
-def prioritize_combinations(combinations, zip_population_data):
-    """Prioritize zip codes with higher population for better yield"""
-    scored_combinations = []
-    for combo in combinations:
-        zip_code = combo.split('-')[0]
-        population = zip_population_data.get(zip_code, 1000)
-        score = population  # Higher population = higher priority
-        scored_combinations.append((score, combo))
-    
-    return [combo for _, combo in sorted(scored_combinations, reverse=True)]
 
-def get_adaptive_delay(last_response_time, error_count):
-    base_delay = PAGE_DELAY_SECONDS
-    if error_count > 0:
-        base_delay *= (1 + error_count * 0.5)  # Exponential backoff
-    if last_response_time > 2.0:  # Slow response
-        base_delay *= 1.2
-    return base_delay + random.uniform(0, JITTER_SECONDS)
 
 def main():
-    """Main function to orchestrate the listing collection process - OPTIMIZED VERSION"""
-    # Initialize database connection pool
-    initialize_db_pool()
-    
+    """Main function to orchestrate the listing collection process - SINGLE THREADED VERSION"""
     # Load zip codes and completed combinations log
     unique_zips = load_zip_codes()
     completed_combinations = load_completed_combinations()
-    
-    # OPTIMIZATION: Skip loading existing IDs since we have DB-level uniqueness
-    existing_ids = set()  # Start with empty set, let DB handle duplicates
     
     # Session tracking
     session_listings_count = 0
@@ -398,46 +286,33 @@ def main():
         logger.info("All zip code and body style combinations have already been completed. Nothing to do.")
         return
 
-    max_workers = int(os.getenv('MAX_WORKERS', str(max(1, min(8, int(API_BURST * 2))))))
     worklist = pending_combinations[:max_iterations]
 
-    logger.info(f"Starting OPTIMIZED listing collection with {len(unique_zips)} zip codes available")
+    logger.info(f"Starting SINGLE-THREADED listing collection with {len(unique_zips)} zip codes available")
     logger.info(f"Total combinations: {len(all_combinations)} | Completed: {len(completed_combinations)} | Pending: {len(pending_combinations)}")
-    logger.info(f"Running with max_workers={max_workers}, queueing {len(worklist)} combinations this run")
+    logger.info(f"Processing {len(worklist)} combinations this run")
 
-    with ThreadPoolExecutor(max_workers=max_workers) as executor:
-        futures = {
-            executor.submit(
-                process_combination_task,
-                combo,
-                existing_ids,
-                completed_combinations,
-                existing_ids_lock,
-                completed_lock
-            ): combo
-            for combo in worklist
-        }
-
-        for i, future in enumerate(as_completed(futures), start=1):
-            try:
-                new_count, pages, combo = future.result()
-                session_listings_count += new_count
-                session_iterations += 1
+    for i, combination in enumerate(worklist, start=1):
+        try:
+            zip_code, body_style = combination.split('-', 1)
+            new_count, pages = process_combination(zip_code, body_style, completed_combinations)
+            session_listings_count += new_count
+            session_iterations += 1
+            
+            # Calculate elapsed time
+            elapsed_time = time.time() - session_start_time
+            elapsed_hours = int(elapsed_time // 3600)
+            elapsed_minutes = int((elapsed_time % 3600) // 60)
+            elapsed_seconds = int(elapsed_time % 60)
+            
+            # Show elapsed time every 10 iterations
+            if session_iterations % 10 == 0:
+                logger.info(f"[{i}/{len(worklist)}] Completed {combination}: {new_count} new listings, {pages} pages — session total: {session_listings_count} | Elapsed: {elapsed_hours:02d}:{elapsed_minutes:02d}:{elapsed_seconds:02d}")
+            else:
+                logger.info(f"[{i}/{len(worklist)}] Completed {combination}: {new_count} new listings, {pages} pages — session total: {session_listings_count}")
                 
-                # Calculate elapsed time
-                elapsed_time = time.time() - session_start_time
-                elapsed_hours = int(elapsed_time // 3600)
-                elapsed_minutes = int((elapsed_time % 3600) // 60)
-                elapsed_seconds = int(elapsed_time % 60)
-                
-                # Show elapsed time every 10 iterations
-                if session_iterations % 10 == 0:
-                    logger.info(f"[{i}/{len(worklist)}] Completed {combo}: {new_count} new listings, {pages} pages — session total: {session_listings_count} | Elapsed: {elapsed_hours:02d}:{elapsed_minutes:02d}:{elapsed_seconds:02d}")
-                else:
-                    logger.info(f"[{i}/{len(worklist)}] Completed {combo}: {new_count} new listings, {pages} pages — session total: {session_listings_count}")
-                    
-            except Exception as e:
-                logger.error(f"Worker failed: {e}")
+        except Exception as e:
+            logger.error(f"Failed to process {combination}: {e}")
     
     # Calculate final elapsed time
     total_elapsed_time = time.time() - session_start_time
@@ -447,7 +322,7 @@ def main():
     
     # Final summary
     logger.info(f"\n{'='*60}")
-    logger.info(f"OPTIMIZED SESSION SUMMARY:")
+    logger.info(f"SINGLE-THREADED SESSION SUMMARY:")
     logger.info(f"Total iterations completed: {session_iterations}")
     logger.info(f"Total new listings added: {session_listings_count}")
     logger.info(f"Combinations completed this session: {min(session_iterations, len(pending_combinations))}")
@@ -455,12 +330,6 @@ def main():
     logger.info(f"Remaining combinations: {max(0, len(all_combinations) - len(completed_combinations))}")
     logger.info(f"Total session time: {total_hours:02d}:{total_minutes:02d}:{total_seconds:02d}")
     logger.info(f"{'='*60}")
-    logger.info(f"Used max_workers={max_workers}")
-    
-    # Clean up connection pool
-    if db_pool is not None:
-        db_pool.closeall()
-    logger.info("Database connection pool closed")
 
 if __name__ == "__main__":
     main()
