@@ -12,6 +12,8 @@ import logging
 import random
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
+import subprocess
+from datetime import datetime
 
 # Set up logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
@@ -127,6 +129,65 @@ def save_completed_combinations(completed: List[str]):
     completed_file = 'completed_combinations.pkl'
     with open(completed_file, 'wb') as f:
         pickle.dump(completed, f)
+
+def backup_database():
+    """Backup the PostgreSQL database to a gzipped SQL file"""
+    try:
+        # Get today's date in YYYY-MM-DD format
+        today = datetime.now().strftime('%Y-%m-%d')
+        backup_filename = f"raw_{today}.sql.gz"
+        
+        # Construct pg_dump command
+        cmd = ['docker exec', '-t', 'ksl-used-car-listings-postgres-oltp-1',
+            'pg_dump',
+            f'--host={db_params["host"]}',
+            f'--port=5432',
+            f'--username={db_params["user"]}',
+            f'--dbname={db_params["database"]}',
+            '--verbose',
+            '--clean',
+            '--no-owner',
+            '--no-privileges'
+        ]
+        
+        # Set password environment variable for pg_dump
+        env = os.environ.copy()
+        env['PGPASSWORD'] = db_params['password']
+        
+        logger.info(f"Starting database backup to {backup_filename}")
+        
+        # Execute pg_dump and pipe to gzip
+        with open(backup_filename, 'wb') as f:
+            process = subprocess.Popen(
+                cmd,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                env=env
+            )
+            
+            # Pipe the output through gzip
+            gzip_process = subprocess.Popen(
+                ['gzip'],
+                stdin=process.stdout,
+                stdout=f,
+                stderr=subprocess.PIPE
+            )
+            
+            # Wait for both processes to complete
+            process.stdout.close()
+            gzip_return_code = gzip_process.wait()
+            pg_dump_return_code = process.wait()
+            
+            if pg_dump_return_code == 0 and gzip_return_code == 0:
+                logger.info(f"Database backup completed successfully: {backup_filename}")
+                return True
+            else:
+                logger.error(f"Database backup failed. pg_dump return code: {pg_dump_return_code}, gzip return code: {gzip_return_code}")
+                return False
+                
+    except Exception as e:
+        logger.error(f"Error during database backup: {e}")
+        return False
 
 
 
@@ -272,7 +333,7 @@ def main():
     # Session tracking
     session_listings_count = 0
     session_iterations = 0
-    max_iterations = 200
+    max_iterations = 500
     session_start_time = time.time()  # Track session start time
     
     # Body styles to cycle through
@@ -330,6 +391,14 @@ def main():
     logger.info(f"Remaining combinations: {max(0, len(all_combinations) - len(completed_combinations))}")
     logger.info(f"Total session time: {total_hours:02d}:{total_minutes:02d}:{total_seconds:02d}")
     logger.info(f"{'='*60}")
+    
+    # Backup database after script completion
+    logger.info("Starting database backup...")
+    backup_success = backup_database()
+    if backup_success:
+        logger.info("Script completed successfully with database backup")
+    else:
+        logger.warning("Script completed but database backup failed")
 
 if __name__ == "__main__":
     main()
