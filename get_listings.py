@@ -193,7 +193,7 @@ def backup_database():
 
 def fetch_listings_page(api_key: str, zip_code: str, body_style: str, page: int) -> Dict[str, Any]:
     """Fetch a single page of listings with proper error handling and backoff"""
-    url = f"https://auto.dev/api/listings?apikey={api_key}&body_style[]={body_style}&page={page}&zip={zip_code}&sort_filter=created_at:desc"
+    url = f"https://api.auto.dev/listings?apikey={api_key}&body_style[]={body_style}&page={page}&zip={zip_code}&sort_filter=created_at:desc"
 
     session = get_session()
     attempt = 0
